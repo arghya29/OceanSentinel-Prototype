@@ -1,0 +1,14 @@
+{
+  "name": "oceansentinel-frontend",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "next dev"
+  },
+  "dependencies": {
+    "next": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "react-leaflet": "^4.2.1",
+    "leaflet": "^1.9.4"
+  }
+}
