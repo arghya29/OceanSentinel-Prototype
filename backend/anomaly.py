@@ -102,6 +102,68 @@ def extract_enhanced_features(before, after):
     
     return enhanced_features
 
+def locate_anomaly_in_image(before, after, features):
+    """
+    NEW FUNCTION: Find the pixel location of the strongest anomaly
+    
+    This function identifies WHERE in the satellite image the anomaly is located
+    by finding the centroid of the largest area of change.
+    
+    Returns: (x_pixel, y_pixel, normalized_x, normalized_y)
+        - x_pixel, y_pixel: Pixel coordinates in the image
+        - normalized_x, normalized_y: Normalized coordinates (0-1 range)
+    """
+    # Calculate difference
+    diff = cv2.absdiff(before, after)
+    gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
+    
+    # Apply threshold to find significant changes
+    threshold = 30
+    _, binary = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
+    
+    # Apply morphological operations to clean up noise
+    kernel = np.ones((5, 5), np.uint8)
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+    
+    # Find contours (areas of change)
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    height, width = gray.shape
+    
+    if len(contours) == 0:
+        # No significant change found, return center
+        print("⚠️  No significant contours found, using image center")
+        return (width // 2, height // 2, 0.5, 0.5)
+    
+    # Find the largest contour (most significant change area)
+    largest_contour = max(contours, key=cv2.contourArea)
+    contour_area = cv2.contourArea(largest_contour)
+    
+    # Check if contour is significant enough
+    image_area = height * width
+    if contour_area < image_area * 0.001:  # Less than 0.1% of image
+        print(f"⚠️  Largest contour too small ({contour_area / image_area * 100:.2f}%), using image center")
+        return (width // 2, height // 2, 0.5, 0.5)
+    
+    # Get centroid of the largest change area
+    M = cv2.moments(largest_contour)
+    if M["m00"] != 0:
+        cx = int(M["m10"] / M["m00"])
+        cy = int(M["m01"] / M["m00"])
+    else:
+        cx = width // 2
+        cy = height // 2
+    
+    # Normalize to 0-1 range (for coordinate conversion)
+    normalized_x = cx / width
+    normalized_y = cy / height
+    
+    print(f"✅ Anomaly located at pixel ({cx}, {cy}), normalized ({normalized_x:.3f}, {normalized_y:.3f})")
+    print(f"   Contour area: {contour_area:.0f} pixels ({contour_area / image_area * 100:.2f}% of image)")
+    
+    return (cx, cy, normalized_x, normalized_y)
+
 def get_or_train_model(model_path='models/anomaly_detector.pkl'):
     """
     IMPROVEMENT 1: Pre-trained model management
@@ -216,6 +278,11 @@ def detect_anomaly(before, after, use_enhanced_features=True):
     - Pre-trained model loading (Improvement 1)
     - Enhanced feature extraction (Improvement 3)
     - Better confidence scoring (Improvement 4)
+    - NEW: Spatial anomaly localization
+    
+    Returns:
+        Tuple: (anomaly_level, confidence_score, features, pixel_location)
+        - pixel_location: (pixel_x, pixel_y, normalized_x, normalized_y)
     """
     # Validate images
     if before is None or after is None:
@@ -230,6 +297,15 @@ def detect_anomaly(before, after, use_enhanced_features=True):
         features = extract_enhanced_features(before, after)
     else:
         features = extract_features(before, after)
+    
+    # NEW: Locate anomaly in image
+    pixel_x, pixel_y, norm_x, norm_y = locate_anomaly_in_image(before, after, features)
+    pixel_location = {
+        'pixel_x': int(pixel_x),
+        'pixel_y': int(pixel_y),
+        'normalized_x': float(norm_x),
+        'normalized_y': float(norm_y)
+    }
     
     # Create feature vector for ML
     if use_enhanced_features:
@@ -280,13 +356,20 @@ def detect_anomaly(before, after, use_enhanced_features=True):
         else:
             anomaly_level = "LOW"
     
-    return anomaly_level, confidence, features
+    return anomaly_level, confidence, features, pixel_location
 
 def analyze_specific_indicators(before, after):
     """
-    Analyze specific coastal risk indicators
+    FIXED VERSION: Analyze specific coastal risk indicators
+    - Lower thresholds for better sensitivity
+    - Added debug logging
+    - Additional indicator types
     """
     indicators = []
+    
+    print("\n" + "="*60)
+    print("🔍 INDICATOR ANALYSIS DEBUG")
+    print("="*60)
     
     # Convert to different color spaces for analysis
     before_hsv = cv2.cvtColor(before, cv2.COLOR_BGR2HSV)
@@ -300,8 +383,12 @@ def analyze_specific_indicators(before, after):
     # Use float conversion to avoid overflow
     green_increase = (float(np.sum(after_green)) - float(np.sum(before_green))) / float(before_green.size) * 100
     
-    if green_increase > 5:
+    print(f"🟢 Green increase: {green_increase:.2f}% (threshold: 2%)")
+    
+    # FIXED: Lowered from 5 to 2
+    if green_increase > 2:
         indicators.append("Possible algal bloom detected")
+        print("   ✅ DETECTED: Algal bloom")
     
     # 2. Surface reflectance changes
     before_gray = cv2.cvtColor(before, cv2.COLOR_BGR2GRAY)
@@ -309,8 +396,12 @@ def analyze_specific_indicators(before, after):
     
     reflectance_change = np.mean(after_gray) - np.mean(before_gray)
     
-    if abs(reflectance_change) > 15:
+    print(f"💡 Reflectance change: {reflectance_change:.2f} (threshold: 8)")
+    
+    # FIXED: Lowered from 15 to 8
+    if abs(reflectance_change) > 8:
         indicators.append("Surface reflectance anomaly")
+        print("   ✅ DETECTED: Surface reflectance anomaly")
     
     # 3. Temperature proxy (using IR-like channel simulation)
     # In real implementation, would use actual thermal bands
@@ -319,7 +410,54 @@ def analyze_specific_indicators(before, after):
     
     temp_change = np.mean(after_red) - np.mean(before_red)
     
-    if temp_change > 10:
+    print(f"🌡️  Temperature proxy change: {temp_change:.2f} (threshold: 5)")
+    
+    # FIXED: Lowered from 10 to 5
+    if temp_change > 5:
         indicators.append("Sea Surface Temperature deviation (simulated)")
+        print("   ✅ DETECTED: Temperature deviation")
+    
+    # NEW: 4. Blue channel analysis (water quality)
+    before_blue = before[:, :, 0]
+    after_blue = after[:, :, 0]
+    blue_change = np.mean(after_blue) - np.mean(before_blue)
+    
+    print(f"🔵 Blue channel change: {blue_change:.2f} (threshold: 6)")
+    
+    if abs(blue_change) > 6:
+        indicators.append("Water color change detected")
+        print("   ✅ DETECTED: Water color change")
+    
+    # NEW: 5. Edge-based structural change
+    before_edges = cv2.Canny(before_gray, 50, 150)
+    after_edges = cv2.Canny(after_gray, 50, 150)
+    edge_change = np.sum(cv2.absdiff(before_edges, after_edges))
+    
+    print(f"🔲 Edge change: {edge_change:.0f} (threshold: 800000)")
+    
+    if edge_change > 800000:
+        indicators.append("Structural change in water surface")
+        print("   ✅ DETECTED: Structural change")
+    
+    # NEW: 6. Texture analysis
+    diff = cv2.absdiff(before, after)
+    gray_diff = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
+    
+    # Calculate local standard deviation
+    kernel_size = 15
+    mean = cv2.blur(gray_diff.astype(float), (kernel_size, kernel_size))
+    sqr_mean = cv2.blur((gray_diff.astype(float))**2, (kernel_size, kernel_size))
+    variance = sqr_mean - mean**2
+    texture_change = np.mean(np.sqrt(np.abs(variance)))
+    
+    print(f"🔲 Texture change: {texture_change:.2f} (threshold: 8)")
+    
+    if texture_change > 8:
+        indicators.append("Water texture anomaly detected")
+        print("   ✅ DETECTED: Texture anomaly")
+    
+    print("="*60)
+    print(f"📊 Total indicators found: {len(indicators)}")
+    print("="*60 + "\n")
     
     return indicators if indicators else ["No specific indicators detected"]

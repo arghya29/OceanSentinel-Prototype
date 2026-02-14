@@ -1,7 +1,10 @@
-flask
-flask-cors
+Flask
+Flask-CORS
 opencv-python
-numpy
 scikit-learn
 joblib
+numpy
 scipy
+requests
+python-dotenv
+sentinelhub

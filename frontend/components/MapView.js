@@ -18,9 +18,19 @@ const Popup = dynamic(
   () => import("react-leaflet").then((m) => m.Popup),
   { ssr: false }
 );
+const Circle = dynamic(
+  () => import("react-leaflet").then((m) => m.Circle),
+  { ssr: false }
+);
+const Polyline = dynamic(
+  () => import("react-leaflet").then((m) => m.Polyline),
+  { ssr: false }
+);
 
 export default function MapView({ data }) {
   const [icons, setIcons] = useState(null);
+  const [radarRadius, setRadarRadius] = useState(10000); // Start at 10km
+  const [scanning, setScanning] = useState(true);
 
   // Create icons ONLY on client
   useEffect(() => {
@@ -57,6 +67,21 @@ export default function MapView({ data }) {
           iconAnchor: [8, 8],
         });
 
+      const centerMarker = () =>
+        new L.DivIcon({
+          html: `<div style="
+            width:16px;
+            height:16px;
+            background:#3b82f6;
+            border:3px solid white;
+            border-radius:50%;
+            box-shadow:0 0 12px rgba(59, 130, 246, 0.6);
+          "></div>`,
+          className: "",
+          iconSize: [16, 16],
+          iconAnchor: [8, 8],
+        });
+
       setIcons({
         modelLow: square("#22c55e"),
         modelMedium: square("#f97316"),
@@ -64,9 +89,35 @@ export default function MapView({ data }) {
         modelCritical: square("#991b1b"),
         low: circle("#22c55e"),
         medium: circle("#f97316"),
+        regionCenter: centerMarker(),
       });
     });
   }, []);
+
+  // Animated radar scanning effect - CONTINUOUS, FULL AREA COVERAGE
+  useEffect(() => {
+    if (!scanning) return;
+
+    const interval = setInterval(() => {
+      setRadarRadius((prev) => {
+        // Pulse from 10km to 45km (covers full 6500 km²), then reset
+        if (prev >= 45000) {
+          return 10000; // Reset to 10km
+        }
+        return prev + 1000; // Grow by 1km per step
+      });
+    }, 100); // Update every 100ms for smooth animation
+
+    return () => {
+      clearInterval(interval);
+    };
+  }, [scanning, data.locationName]); // Restart when location changes
+
+  // Restart scanning when location changes
+  useEffect(() => {
+    setScanning(true);
+    setRadarRadius(10000); // Reset to 10km
+  }, [data.locationName]);
 
   if (!data || !icons) {
     return (
@@ -84,23 +135,33 @@ export default function MapView({ data }) {
     );
   }
 
-  const realPoint = {
-    lat: data.latitude,
-    lng: data.longitude,
+  // FIXED: Use separate coordinates
+  const regionCenter = {
+    lat: data.regionCenter.latitude,
+    lng: data.regionCenter.longitude
+  };
+
+  const anomalyPoint = {
+    lat: data.anomalyLocation.latitude,
+    lng: data.anomalyLocation.longitude,
     risk: data.risk,
   };
+
+  console.log("🗺️ MapView - Region center:", regionCenter);
+  console.log("🗺️ MapView - Anomaly point:", anomalyPoint);
+  console.log("🗺️ MapView - Distance:", data.anomalyLocation.distanceFromCenter, "km");
 
   // FIXED: Observation points in OCEAN (EAST of Indian coast)
   const simulatedPoints = [
     { 
-      lat: realPoint.lat + 0.15,
-      lng: realPoint.lng + 0.35,
+      lat: anomalyPoint.lat + 0.15,
+      lng: anomalyPoint.lng + 0.35,
       risk: "LOW",
       source: "Coastal monitoring buoy"
     },
     { 
-      lat: realPoint.lat - 0.15,
-      lng: realPoint.lng + 0.45,
+      lat: anomalyPoint.lat - 0.15,
+      lng: anomalyPoint.lng + 0.45,
       risk: "MEDIUM",
       source: "Offshore observation platform"
     },
@@ -113,12 +174,18 @@ export default function MapView({ data }) {
     return icons.modelLow;
   };
 
-  const modelIcon = getModelIcon(realPoint.risk);
+  const modelIcon = getModelIcon(anomalyPoint.risk);
+
+  // Calculate area being analyzed
+  const areaKm2 = Math.PI * Math.pow(radarRadius / 1000, 2);
+
+  // Check if anomaly is at region center (within 0.5 km)
+  const isAnomalyAtCenter = data.anomalyLocation.distanceFromCenter < 0.5;
 
   return (
     <div style={{ position: "relative" }}>
       <MapContainer
-        center={[realPoint.lat, realPoint.lng]}
+        center={[regionCenter.lat, regionCenter.lng]}
         zoom={8}
         style={{ 
           height: "600px", 
@@ -131,8 +198,109 @@ export default function MapView({ data }) {
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
         />
 
-        {/* MAIN DETECTION MARKER */}
-        <Marker position={[realPoint.lat, realPoint.lng]} icon={modelIcon}>
+        {/* ANIMATED RADAR SCANNING EFFECT - CENTERED ON REGION */}
+        {scanning && (
+          <>
+            {/* Outer pulse ring */}
+            <Circle
+              center={[regionCenter.lat, regionCenter.lng]}
+              radius={radarRadius}
+              pathOptions={{
+                color: "#3b82f6",
+                fillColor: "#3b82f6",
+                fillOpacity: 0.1,
+                weight: 2,
+                opacity: 0.6
+              }}
+            />
+            
+            {/* Inner bright ring */}
+            <Circle
+              center={[regionCenter.lat, regionCenter.lng]}
+              radius={radarRadius * 0.8}
+              pathOptions={{
+                color: "#60a5fa",
+                fillColor: "#60a5fa",
+                fillOpacity: 0.15,
+                weight: 1,
+                opacity: 0.8
+              }}
+            />
+          </>
+        )}
+
+        {/* Coverage area circle (always visible, subtle) - 6500 km² */}
+        <Circle
+          center={[regionCenter.lat, regionCenter.lng]}
+          radius={45000} // 45km radius = ~6500 km² area
+          pathOptions={{
+            color: "#10b981",
+            fillColor: "#10b981",
+            fillOpacity: 0.05,
+            weight: 1,
+            opacity: 0.3,
+            dashArray: "5, 5"
+          }}
+        />
+
+        {/* REGION CENTER MARKER (scanning origin) */}
+        {!isAnomalyAtCenter && (
+          <Marker position={[regionCenter.lat, regionCenter.lng]} icon={icons.regionCenter}>
+            <Popup maxWidth={280}>
+              <div style={{ fontSize: "13px", lineHeight: "1.6" }}>
+                <div style={{ 
+                  fontSize: "15px", 
+                  fontWeight: "700", 
+                  color: "#3b82f6",
+                  marginBottom: "8px",
+                  paddingBottom: "8px",
+                  borderBottom: "2px solid #e5e7eb"
+                }}>
+                  ● Monitoring Region Center
+                </div>
+                
+                <div style={{ marginBottom: "6px" }}>
+                  <strong>Location:</strong> {data.locationName}
+                </div>
+                
+                <div style={{ marginBottom: "6px" }}>
+                  <strong>Coordinates:</strong> {regionCenter.lat.toFixed(4)}°N, {regionCenter.lng.toFixed(4)}°E
+                </div>
+                
+                <div style={{ 
+                  fontSize: "12px",
+                  color: "#64748b",
+                  marginTop: "8px",
+                  padding: "8px",
+                  background: "#f8fafc",
+                  borderRadius: "6px"
+                }}>
+                  This is the center of the satellite monitoring region (~6500 km²). 
+                  The scanning animation radiates from this point.
+                </div>
+              </div>
+            </Popup>
+          </Marker>
+        )}
+
+        {/* LINE CONNECTING CENTER TO ANOMALY (if different) */}
+        {!isAnomalyAtCenter && (
+          <Polyline
+            positions={[
+              [regionCenter.lat, regionCenter.lng],
+              [anomalyPoint.lat, anomalyPoint.lng]
+            ]}
+            pathOptions={{
+              color: "#f97316",
+              weight: 2,
+              opacity: 0.6,
+              dashArray: "10, 10"
+            }}
+          />
+        )}
+
+        {/* ANOMALY DETECTION MARKER */}
+        <Marker position={[anomalyPoint.lat, anomalyPoint.lng]} icon={modelIcon}>
           <Popup maxWidth={320}>
             <div style={{ fontSize: "13px", lineHeight: "1.6" }}>
               <div style={{ 
@@ -143,12 +311,21 @@ export default function MapView({ data }) {
                 paddingBottom: "8px",
                 borderBottom: "2px solid #e5e7eb"
               }}>
-                ♦ Detected Anomaly (Model Output)
+                ♦ Detected Anomaly
               </div>
               
               <div style={{ marginBottom: "8px" }}>
                 <strong style={{ color: "#475569" }}>Location:</strong> {data.locationName}
               </div>
+              
+              {!isAnomalyAtCenter && (
+                <div style={{ marginBottom: "8px" }}>
+                  <strong style={{ color: "#475569" }}>Distance from center:</strong>{" "}
+                  <span style={{ color: "#f97316", fontWeight: "600" }}>
+                    {data.anomalyLocation.distanceFromCenter.toFixed(2)} km
+                  </span>
+                </div>
+              )}
               
               <div style={{ marginBottom: "8px" }}>
                 <strong style={{ color: "#475569" }}>Risk Level:</strong>{" "}
@@ -290,6 +467,44 @@ export default function MapView({ data }) {
         }}>
           Currently showing: <span style={{ fontWeight: "600", color: "#1e40af" }}>{data.locationName}</span>
         </div>
+        
+        {/* Scanning indicator - ALWAYS VISIBLE since continuous */}
+        <div style={{
+          marginTop: "8px",
+          padding: "6px 10px",
+          background: "#dbeafe",
+          borderRadius: "6px",
+          fontSize: "12px",
+          color: "#1e40af",
+          fontWeight: "600",
+          display: "flex",
+          alignItems: "center",
+          gap: "6px"
+        }}>
+          <div style={{
+            width: "8px",
+            height: "8px",
+            borderRadius: "50%",
+            background: "#3b82f6",
+            animation: "pulse 1s ease-in-out infinite"
+          }}></div>
+          Scanning area: {areaKm2.toFixed(1)} km² (Total: 6500 km²)
+        </div>
+
+        {/* Spatial info */}
+        {!isAnomalyAtCenter && (
+          <div style={{
+            marginTop: "8px",
+            padding: "6px 10px",
+            background: "#fef3c7",
+            borderRadius: "6px",
+            fontSize: "11px",
+            color: "#78350f",
+            lineHeight: "1.4"
+          }}>
+            <strong>📏 Anomaly detected {data.anomalyLocation.distanceFromCenter.toFixed(2)} km from scan center</strong>
+          </div>
+        )}
       </div>
 
       {/* LEGEND - BOTTOM RIGHT */}
@@ -343,8 +558,33 @@ export default function MapView({ data }) {
             }}></div>
             <span style={{ color: "#475569" }}>High — Inspection</span>
           </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", marginTop: "4px", paddingTop: "4px", borderTop: "1px solid #e5e7eb" }}>
+            <div style={{
+              width: "12px",
+              height: "12px",
+              borderRadius: "50%",
+              background: "#3b82f6",
+              border: "2px solid white",
+              boxShadow: "0 0 4px rgba(0,0,0,0.2)"
+            }}></div>
+            <span style={{ color: "#475569" }}>Scan Center</span>
+          </div>
         </div>
       </div>
+
+      {/* CSS for pulse animation */}
+      <style jsx>{`
+        @keyframes pulse {
+          0%, 100% {
+            opacity: 1;
+            transform: scale(1);
+          }
+          50% {
+            opacity: 0.5;
+            transform: scale(1.2);
+          }
+        }
+      `}</style>
     </div>
   );
 }
